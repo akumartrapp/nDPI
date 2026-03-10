@@ -20,8 +20,14 @@ RETVAL=$(( RETVAL + $? ))
 RETVAL=$(( RETVAL + $? ))
 ./tor_ip_addresses_download.sh
 RETVAL=$(( RETVAL + $? ))
-./whatsapp_ip_addresses_download.sh
-RETVAL=$(( RETVAL + $? ))
+
+
+#
+# An update is required. See https://developers.facebook.com/docs/whatsapp/on-premises/sunset
+#
+#./whatsapp_ip_addresses_download.sh
+#RETVAL=$(( RETVAL + $? ))
+
 ./zoom_ip_addresses_download.sh
 RETVAL=$(( RETVAL + $? ))
 ./google_cloud_ip_addresses_download.sh
@@ -39,6 +45,10 @@ RETVAL=$(( RETVAL + $? ))
 ./digitalocean_ip_addresses_download.sh
 RETVAL=$(( RETVAL + $? ))
 ./tor_exit_nodes_ip_addresses_download.sh
+RETVAL=$(( RETVAL + $? ))
+./github_ip_addresses_download.sh
+RETVAL=$(( RETVAL + $? ))
+./github_domains_download.sh
 RETVAL=$(( RETVAL + $? ))
 
 ./asn_update.sh

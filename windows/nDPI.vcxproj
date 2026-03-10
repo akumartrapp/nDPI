@@ -141,6 +141,7 @@
     <ClCompile Include="..\src\lib\ndpi_hash.c" />
     <ClCompile Include="..\src\lib\ndpi_domain_classify.c" />
     <ClCompile Include="..\src\lib\ndpi_bitmap64_fuse.c" />
+    <ClCompile Include="..\src\lib\ndpi_plugin.c" />
     <ClCompile Include="..\src\lib\protocols\activision.c" />
     <ClCompile Include="..\src\lib\protocols\afp.c" />
     <ClCompile Include="..\src\lib\protocols\ajp.c" />
@@ -148,7 +149,6 @@
     <ClCompile Include="..\src\lib\protocols\amazon_video.c" />
     <ClCompile Include="..\src\lib\protocols\among_us.c" />
     <ClCompile Include="..\src\lib\protocols\amqp.c" />
-    <ClCompile Include="..\src\lib\protocols\apple_push.c" />
     <ClCompile Include="..\src\lib\protocols\avast.c" />
     <ClCompile Include="..\src\lib\protocols\avast_securedns.c" />
     <ClCompile Include="..\src\lib\protocols\bacnet.c" />
@@ -278,6 +278,7 @@
     <ClCompile Include="..\src\lib\protocols\monero.c" />
     <ClCompile Include="..\src\lib\protocols\mpegts.c" />
     <ClCompile Include="..\src\lib\protocols\mqtt.c" />
+    <ClCompile Include="..\src\lib\protocols\msgpack.c" />
     <ClCompile Include="..\src\lib\protocols\mssql_tds.c" />
     <ClCompile Include="..\src\lib\protocols\mudfish.c" />
     <ClCompile Include="..\src\lib\protocols\munin.c" />
@@ -360,6 +361,7 @@
     <ClCompile Include="..\src\lib\protocols\hislip.c" />
     <ClCompile Include="..\src\lib\protocols\uftp.c" />
     <ClCompile Include="..\src\lib\protocols\openflow.c" />
+    <ClCompile Include="..\src\lib\protocols\json.c" />
     <ClCompile Include="..\src\lib\protocols\json-rpc.c" />
     <ClCompile Include="..\src\lib\protocols\kafka.c" />
     <ClCompile Include="..\src\lib\protocols\nomachine.c" />

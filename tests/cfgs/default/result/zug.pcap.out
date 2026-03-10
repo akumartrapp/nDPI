@@ -1,7 +1,7 @@
 DPI Packets (UDP):	7	(1.00 pkts/flow)
 Confidence Unknown          : 1 (flows)
 Confidence DPI              : 6 (flows)
-Num dissector calls: 992 (141.71 diss/flow)
+Num dissector calls: 994 (142.00 diss/flow)
 LRU cache ookla:      0/0/0 (insert/search/found)
 LRU cache bittorrent: 0/3/0 (insert/search/found)
 LRU cache stun:       0/0/0 (insert/search/found)
@@ -46,4 +46,4 @@ Crypto_Currency                  6 984           6
 
 
 Undetected flows:
-	1	UDP 61.59.105.181:19000 -> 199.24.15.231:48793 [proto: 0/Unknown][Stack: Unknown][IP: 0/Unknown][ClearText][Confidence: Unknown][FPC: 0/Unknown, Confidence: Unknown][DPI packets: 1][Breed: Unrated][1 pkts/452 bytes -> 0 pkts/0 bytes][Goodput ratio: 91/0][< 1 sec][Risk: ** Susp Entropy **** Unidirectional Traffic **][Risk Score: 20][Risk Info: No server to client traffic / Entropy: 7.458 (Encrypted or Random?)][Plen Bins: 0,0,0,0,0,0,0,0,0,0,0,0,100,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+	1	UDP 61.59.105.181:19000 -> 199.24.15.231:48793 [proto: 0/Unknown][Stack: Unknown][IP: 0/Unknown][ClearText][Confidence: Unknown][FPC: 0/Unknown, Confidence: Unknown][DPI packets: 1][Breed: Unrated][1 pkts/452 bytes -> 0 pkts/0 bytes][Goodput ratio: 91/0][< 1 sec][Risk: ** Susp Entropy **** Unidirectional Traffic **][Risk Score: 20][Risk Info: No server to client traffic;Entropy: 7.458 (Encrypted or Random?)][Plen Bins: 0,0,0,0,0,0,0,0,0,0,0,0,100,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]

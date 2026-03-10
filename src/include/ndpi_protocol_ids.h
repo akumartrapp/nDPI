@@ -1,7 +1,7 @@
 /*
  * ndpi_protocol_ids.h
  *
- * Copyright (C) 2011-25 - ntop.org
+ * Copyright (C) 2011-26 - ntop.org
  *
  * This file is part of nDPI, an open source deep packet inspection
  * library based on the OpenDPI and PACE technology by ipoque GmbH
@@ -497,6 +497,11 @@ typedef enum {
   NDPI_PROTOCOL_AWS_DYNAMODB          = 465,
   NDPI_PROTOCOL_ESPN                  = 466,
   NDPI_PROTOCOL_AKAMAI                = 467,
+  NDPI_PROTOCOL_JSON                  = 468,
+  NDPI_PROTOCOL_MSGPACK               = 469,
+  NDPI_PROTOCOL_GITHUB_COPILOT        = 470,
+  NDPI_PROTOCOL_GITHUB_PACKAGES       = 471,
+  NDPI_PROTOCOL_GITHUB_ACTIONS        = 472,
 
   /* If you add a new protocol, please update the documentation at doc/protocols.rst, too! */
 

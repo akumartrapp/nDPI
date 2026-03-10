@@ -1,7 +1,7 @@
 DPI Packets (UDP):	12	(3.00 pkts/flow)
 Confidence Unknown          : 1 (flows)
 Confidence DPI              : 3 (flows)
-Num dissector calls: 320 (80.00 diss/flow)
+Num dissector calls: 324 (81.00 diss/flow)
 LRU cache ookla:      0/0/0 (insert/search/found)
 LRU cache bittorrent: 0/3/0 (insert/search/found)
 LRU cache stun:       0/0/0 (insert/search/found)
@@ -45,4 +45,4 @@ VoIP                           102 47087         2
 
 
 Undetected flows:
-	1	UDP 192.168.1.2:30001 -> 212.242.33.36:40393 [proto: 0/Unknown][Stack: Unknown][IP: 0/Unknown][ClearText][Confidence: Unknown][FPC: 0/Unknown, Confidence: Unknown][DPI packets: 1][Breed: Unrated][1 pkts/146 bytes -> 0 pkts/0 bytes][Goodput ratio: 71/0][< 1 sec][Risk: ** Susp Entropy **** Unidirectional Traffic **][Risk Score: 20][Risk Info: No server to client traffic / Entropy: 5.220 (Executable?)][PLAIN TEXT (11894297)][Plen Bins: 0,0,0,100,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+	1	UDP 192.168.1.2:30001 -> 212.242.33.36:40393 [proto: 0/Unknown][Stack: Unknown][IP: 0/Unknown][ClearText][Confidence: Unknown][FPC: 0/Unknown, Confidence: Unknown][DPI packets: 1][Breed: Unrated][1 pkts/146 bytes -> 0 pkts/0 bytes][Goodput ratio: 71/0][< 1 sec][Risk: ** Susp Entropy **** Unidirectional Traffic **][Risk Score: 20][Risk Info: No server to client traffic;Entropy: 5.220 (Executable?)][PLAIN TEXT (11894297)][Plen Bins: 0,0,0,100,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]

@@ -1,7 +1,7 @@
 /*
  * ndpi_domains.c
  *
- * Copyright (C) 2011-25 - ntop.org and contributors
+ * Copyright (C) 2011-26 - ntop.org and contributors
  *
  * nDPI is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -68,7 +68,7 @@ int ndpi_load_domain_suffixes(struct ndpi_detection_module_struct *ndpi_str,
       line[len--] = '\0';
 
     if(ndpi_hash_add_entry(&ndpi_str->public_domain_suffixes,
-			   &line[offset], strlen(&line[offset]), domain_id) != 0) {
+			   &line[offset], strlen(&line[offset]), domain_id, NULL) != 0) {
 
       NDPI_LOG_ERR(ndpi_str, "Error while processing domain %s\n", &line[offset]);
     } else

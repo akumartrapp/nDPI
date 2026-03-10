@@ -1,7 +1,7 @@
 /*
  * ndpi_typedefs.h
  *
- * Copyright (C) 2011-25 - ntop.org
+ * Copyright (C) 2011-26 - ntop.org
  *
  * This file is part of nDPI, an open source deep packet inspection
  * library based on the OpenDPI and PACE technology by ipoque GmbH
@@ -169,6 +169,7 @@ typedef enum {
   NDPI_BINARY_DATA_TRANSFER,   /* Attempt to transfer something in binary format */
   NDPI_PROBING_ATTEMPT,        /* Probing attempt (e.g. TCP connection with no data exchanged or unidirection traffic for bidirectional flows such as SSH) */
   NDPI_OBFUSCATED_TRAFFIC,
+  NDPI_SLOW_DOS,
   /* Before allocating a new risk here, check if there are FREE entries above */
 
   /* Leave this as last member */
@@ -832,12 +833,40 @@ struct ndpi_lru_cache {
 
 /* ************************************************** */
 
+typedef enum {
+  tls_unknown = 0,
+  tls_change_cipher,
+  tls_alert,
+  tls_handshake_encrypted_message,
+  tls_handshake_client_hello,
+  tls_handshake_server_hello,
+  tls_handshake_new_session_ticket,
+  tls_handshake_encrypted_extn,
+  tls_handshake_certificate,
+  tls_handshake_server_key_exchange,
+  tls_handshake_certificate_request,
+  tls_handshake_server_hello_done,
+  tls_handshake_certificate_verify,
+  tls_handshake_client_key_exchange,
+  tls_handshake_finished,
+  tls_application_data,
+  tls_heartbeat,
+} ndpi_tls_block_type;
+
+PACK_ON
 struct ndpi_tls_block {
-  u_int8_t block_type; /* + = src->dst, - = dst->src */
-  int16_t len;
-};
+  u_int8_t block_type /* ndpi_tls_block_type */;
+  int16_t len; /* + = src->dst, - = dst->src */
+  /* Optional, leave it at the end */
+  u_int8_t same_pkt:1, _unused:7;
+  u_int16_t msec_delta; /* Used to store protocol_id in ja4 hash */
+} PACK_OFF;
 
 struct ndpi_flow_tcp_struct {
+  struct {
+    u_int64_t syn_time, syn_ack_time, ack_time;
+  } three_way_handshake;
+
   /* TCP sequence number */
   u_int32_t next_tcp_seq_nr[2];
   u_int16_t last_tcp_pkt_payload_len;
@@ -858,8 +887,9 @@ struct ndpi_flow_tcp_struct {
   struct {
     /* NDPI_PROTOCOL_TLS */
     u_int8_t app_data_seen[2];
-    u_int8_t num_tls_blocks, num_processed_tls_blocks /* used internally for dissection */;
-    struct ndpi_tls_block tls_blocks[NDPI_MAX_NUM_TLS_APPL_BLOCKS];
+    u_int8_t num_tls_blocks /* used internally for dissection */;
+    u_int64_t last_tls_block_time_ms;
+    struct ndpi_tls_block *tls_blocks; /* ndpi_struct->cfg.tls_num_blocks_analyzed */
   } tls;
 
   /* NDPI_PROTOCOL_MAIL_SMTP */
@@ -1026,6 +1056,9 @@ struct ndpi_flow_udp_struct {
   /* NDPI_PROTOCOL_TFTP */
   u_int16_t tftp_data_num;
   u_int16_t tftp_ack_num;
+
+  /* NDPI_PROTOCOL_NTP*/
+  u_int8_t ntp_stage;
 };
 
 /* ************************************************** */
@@ -1277,6 +1310,11 @@ typedef struct _ndpi_automa {
   struct ndpi_automa_stats stats;
 } ndpi_automa;
 
+typedef struct ndpi_list_struct {
+  char *value;
+  struct ndpi_list_struct *next;
+} ndpi_list;
+
 typedef struct ndpi_str_hash {
   void *priv;
   struct ndpi_str_hash_stats stats;
@@ -1352,7 +1390,7 @@ typedef enum {
 } ndpi_cipher_weakness;
 
 #define MAX_NUM_TLS_SIGNATURE_ALGORITHMS 16
-#define MAX_NUM_DNS_RSP_ADDRESSES         4
+#define MAX_NUM_DNS_RSP_ADDRESSES         8
 
 typedef struct {
   union {
@@ -1411,6 +1449,135 @@ struct rtp_info {
   u_int32_t evs_subtype;
 };
 
+typedef enum {
+  ndpi_serialization_format_unknown = 0,
+  ndpi_serialization_format_tlv,
+  ndpi_serialization_format_json,
+  ndpi_serialization_format_csv,
+  ndpi_serialization_format_multiline_json, /* new-line separated records */
+  ndpi_serialization_format_inner_json /* no outer braces */
+} ndpi_serialization_format;
+
+/* Note:
+ * - up to 16 types (TLV encoding: "4 bit key type" << 4 | "4 bit value type")
+ * - key supports string and uint32 (compressed to uint8/uint16) only, this is also enforced by the API
+ * - always add new enum at the end of the list (to avoid breaking backward compatibility) */
+typedef enum {
+  ndpi_serialization_unknown        =  0,
+  ndpi_serialization_end_of_record  =  1,
+  ndpi_serialization_uint8          =  2,
+  ndpi_serialization_uint16         =  3,
+  ndpi_serialization_uint32         =  4,
+  ndpi_serialization_uint64         =  5,
+  ndpi_serialization_int8           =  6,
+  ndpi_serialization_int16          =  7,
+  ndpi_serialization_int32          =  8,
+  ndpi_serialization_int64          =  9,
+  ndpi_serialization_float          = 10,
+  ndpi_serialization_string         = 11,
+  ndpi_serialization_start_of_block = 12,
+  ndpi_serialization_end_of_block   = 13,
+  ndpi_serialization_start_of_list  = 14,
+  ndpi_serialization_end_of_list    = 15,
+  /* Do not add new types!
+   * Exceeding 16 types requires reworking the TLV encoding due to key type limit (4 bit) */
+  ndpi_serialization_double         = 16 /* FIXX this is currently unusable */
+} ndpi_serialization_type;
+
+#define NDPI_SERIALIZER_DEFAULT_HEADER_SIZE 1024
+#define NDPI_SERIALIZER_DEFAULT_BUFFER_SIZE  256
+#define NDPI_SERIALIZER_DEFAULT_BUFFER_INCR 1024
+
+#define NDPI_SERIALIZER_STATUS_COMMA     (1 << 0)
+#define NDPI_SERIALIZER_STATUS_ARRAY     (1 << 1)
+#define NDPI_SERIALIZER_STATUS_EOR       (1 << 2)
+#define NDPI_SERIALIZER_STATUS_SOB       (1 << 3)
+#define NDPI_SERIALIZER_STATUS_NOT_EMPTY (1 << 4)
+#define NDPI_SERIALIZER_STATUS_LIST      (1 << 5)
+#define NDPI_SERIALIZER_STATUS_SOL       (1 << 6)
+#define NDPI_SERIALIZER_STATUS_HDR_DONE  (1 << 7)
+#define NDPI_SERIALIZER_STATUS_CEOB      (1 << 8)
+
+typedef struct {
+  u_int32_t size_used;
+} ndpi_private_serializer_buffer_status;
+
+typedef struct {
+  u_int32_t flags;
+  ndpi_private_serializer_buffer_status buffer;
+  ndpi_private_serializer_buffer_status header;
+} ndpi_private_serializer_status;
+
+typedef struct {
+  u_int32_t initial_size;
+  u_int32_t size;
+  u_int8_t *data;
+} ndpi_private_serializer_buffer;
+
+typedef struct {
+  ndpi_private_serializer_status status;
+  ndpi_private_serializer_buffer buffer;
+  ndpi_private_serializer_buffer header;
+  ndpi_serialization_format fmt;
+  char csv_separator[2];
+  u_int8_t has_snapshot;
+  u_int8_t multiline_json_array;
+  u_int8_t inner_json;
+  ndpi_private_serializer_status snapshot;
+} ndpi_private_serializer;
+
+#define ndpi_private_deserializer ndpi_private_serializer
+
+#ifdef NDPI_CFFI_PREPROCESSING
+typedef struct { char c[72]; } ndpi_serializer;
+#else
+typedef struct { char c[sizeof(ndpi_private_serializer)]; } ndpi_serializer;
+#endif
+
+#define ndpi_deserializer ndpi_serializer
+
+/* **************************************** */
+
+typedef void (*nDPIPluginFctn)(struct ndpi_detection_module_struct *ndpi_struct);
+typedef void (*nDPIPluginFreeFlowFctn)(void *plugin_data);
+typedef void (*nDPIPluginJsonExportFlowFctn)(struct ndpi_detection_module_struct *ndpi_struct,
+					     struct ndpi_flow_struct *flow,
+					     ndpi_serializer *serializer);
+
+typedef struct ndpi_protocol_plugin {
+  u_int32_t ndpi_revision;
+  const char *protocol_name, *version, *description, *author;
+  nDPIPluginFctn initFctn;
+  nDPIPluginFreeFlowFctn freeFlowFctn;
+  nDPIPluginJsonExportFlowFctn jsonExportFctn;
+} NDPIProtocolPluginEntryPoint;
+
+/* **************************************** */
+
+typedef int (*ProcessExtraPacketsFunc) (struct ndpi_detection_module_struct *, struct ndpi_flow_struct *flow);
+
+typedef struct {
+  u_int16_t tls_handshake_version;
+  u_int16_t num_ciphers, cipher[MAX_NUM_JA];
+  u_int16_t num_tls_extensions, tls_extension[MAX_NUM_JA];
+  u_int16_t num_elliptic_curve_groups, elliptic_curve_group[MAX_NUM_JA];
+  u_int16_t num_elliptic_curve_point_format, elliptic_curve_point_format[MAX_NUM_JA];
+  u_int16_t num_signature_algorithms, signature_algorithm[MAX_NUM_JA];
+  u_int16_t num_supported_versions, supported_version[MAX_NUM_JA];
+  u_int16_t num_key_share_groups, key_share_group[MAX_NUM_JA];
+  char signature_algorithms_str[MAX_JA_STRLEN], alpn[MAX_JA_STRLEN];
+  char alpn_original_last;  /* Store original last character before null terminator */
+} ndpi_tls_client_info;
+
+typedef struct {
+  u_int16_t tls_handshake_version;
+  u_int16_t num_ciphers, cipher[MAX_NUM_JA];
+  u_int16_t num_tls_extensions, tls_extension[MAX_NUM_JA];
+  u_int16_t tls_supported_version;
+  u_int16_t num_elliptic_curve_point_format, elliptic_curve_point_format[MAX_NUM_JA];
+  char alpn[MAX_JA_STRLEN];
+} ndpi_tls_server_info;
+
 struct ndpi_flow_struct {
   u_int16_t detected_protocol_stack[NDPI_PROTOCOL_SIZE];
   struct ndpi_proto_stack protocol_stack;
@@ -1447,7 +1614,7 @@ struct ndpi_flow_struct {
   u_int8_t num_extra_packets_checked;
   u_int16_t num_processed_pkts; /* <= WARNING it can wrap but we do expect people to giveup earlier */
 
-  int (*extra_packets_func) (struct ndpi_detection_module_struct *, struct ndpi_flow_struct *flow);
+  ProcessExtraPacketsFunc extra_packets_func;
 
   u_int64_t last_packet_time_ms;
 
@@ -1540,7 +1707,7 @@ struct ndpi_flow_struct {
 
   struct {
     message_t message[2]; /* Directions */
-    u_int8_t certificate_processed:1, change_cipher_from_client:1, change_cipher_from_server:1, from_opportunistic_tls:1, from_rdp:1, pad:3;
+    u_int8_t certificate_processed:1, change_cipher_from_client:1, change_cipher_from_server:1, from_opportunistic_tls:1, from_rdp:1, alert:1, pad:2;
     struct tls_obfuscated_heuristic_state *obfuscated_heur_state;
   } tls_quic; /* Used also by DTLS and POPS/IMAPS/SMTPS/FTPS */
 
@@ -1559,10 +1726,14 @@ struct ndpi_flow_struct {
       char ptr_domain_name[64 /* large enough but smaller than { } tls */];
     } dns;
 
-    struct {
-      u_int8_t version;
-      u_int8_t mode;
-    } ntp;
+    struct ntp_info {
+      u_int8_t leap_indicator: 2, version: 3, mode: 3;
+      u_int8_t stratum;
+      int8_t ppol, precision;
+      float root_delay, root_dispersion;
+      char ref_id[20];
+      uint64_t ref_time, org_time, rec_time, trans_time;
+    } ntp[2];
 
     struct {
       char hostname[48], domain[48], username[48];
@@ -1582,18 +1753,11 @@ struct ndpi_flow_struct {
     struct {
       char *server_names, *advertised_alpns, *negotiated_alpn, *tls_supported_versions, *issuerDN, *subjectDN;
       u_int32_t notBefore, notAfter;
-      char ja3_server[33], ja4_client[37], *ja4_client_raw;
+      char ja3_server[33], ja4_client[37], ja4_ndpi_client[37], *ja4_client_raw;
       u_int16_t server_cipher;
       u_int8_t sha1_certificate_fingerprint[20];
       u_int8_t client_hello_processed:1, ch_direction:1, subprotocol_detected:1,
-	server_hello_processed:1, fingerprint_set:1, webrtc:1,
-	pq_key_share:1, pq_supported_groups:1;
-
-#ifdef TLS_HANDLE_SIGNATURE_ALGORITMS
-      /* Under #ifdef to save memory for those who do not need them */
-      u_int8_t num_tls_signature_algorithms;
-      u_int16_t client_signature_algorithms[MAX_NUM_TLS_SIGNATURE_ALGORITHMS];
-#endif
+	server_hello_processed:1, fingerprint_set:1, webrtc:1;
 
       struct tls_heuristics browser_heuristics;
       u_int16_t ssl_version, server_names_len;
@@ -1606,11 +1770,18 @@ struct ndpi_flow_struct {
 
       u_int32_t quic_version;
       u_int32_t quic_idle_timeout_sec;
+
+      /* Optionally allocated based on nDPI configuration */
+      ndpi_tls_client_info *ja_client;
+      ndpi_tls_server_info *ja_server;
     } tls_quic; /* Used also by DTLS and POPS/IMAPS/SMTPS/FTPS */
 
     struct {
       char client_signature[48], server_signature[48];
       char hassh_client[33], hassh_server[33];
+      char *client_key_exchange_algorithms,
+	*server_key_exchange_algorithms,
+	*key_exchange_method;
     } ssh;
 
     struct {
@@ -1734,7 +1905,27 @@ struct ndpi_flow_struct {
       u_int16_t user_id;
     } bfcp;
 
+    struct {
+      u_int16_t num_requests;       /* Total number of requests (Job messages) */
+      u_int16_t num_responses;      /* Total number of responses (Ack_Data messages) */
+      u_int8_t num_acks;            /* Number of acknowledgments without data */
+      u_int8_t num_userdata;        /* Number of UserData messages */
+      /* Function code counters (top 8 most common S7Comm functions) */
+      u_int8_t num_read_var;        /* Read Var (0x04) */
+      u_int8_t num_write_var;       /* Write Var (0x05) */
+      u_int8_t num_setup_comm;      /* Setup Communication (0xF0) */
+      u_int8_t num_download;        /* Download (0x1A) */
+      u_int8_t num_upload;          /* Upload (0x1B) */
+      u_int8_t num_plc_control;     /* PLC Control (0x28) */
+      u_int8_t num_plc_stop;        /* PLC Stop (0x29) */
+      u_int8_t num_other_funcs;     /* Other function codes */
+    } s7comm;
   } protos;
+
+  struct {
+    NDPIProtocolPluginEntryPoint *plugin;
+    void *plugin_data;
+  } custom;
 
   /* **Packet** metadata for flows where monitoring is enabled. It is reset after each packet! */
   struct ndpi_metadata_monitoring *monit;
@@ -1790,11 +1981,11 @@ struct ndpi_flow_struct {
 
 #if !defined(NDPI_CFFI_PREPROCESSING) && defined(__linux__)
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-_Static_assert(sizeof(((struct ndpi_flow_struct *)0)->protos) <= 264,
-               "Size of the struct member protocols increased to more than 264 bytes, "
+_Static_assert(sizeof(((struct ndpi_flow_struct *)0)->protos) <= 328,
+               "Size of the struct member protocols increased to more than 328 bytes, "
                "please check if this change is necessary.");
-_Static_assert(sizeof(struct ndpi_flow_struct) <= 1232,
-               "Size of the flow struct increased to more than 1232 bytes, "
+_Static_assert(sizeof(struct ndpi_flow_struct) <= 1304,
+               "Size of the flow struct increased to more than 1304 bytes, "
                "please check if this change is necessary.");
 #endif
 #endif
@@ -1826,93 +2017,6 @@ typedef struct {
   ndpi_protocol_category_t protocol_category;
   ndpi_protocol_breed_t protocol_breed;
 } ndpi_protocol_match_result;
-
-typedef enum {
-  ndpi_serialization_format_unknown = 0,
-  ndpi_serialization_format_tlv,
-  ndpi_serialization_format_json,
-  ndpi_serialization_format_csv,
-  ndpi_serialization_format_multiline_json, /* new-line separated records */
-  ndpi_serialization_format_inner_json /* no outer braces */
-} ndpi_serialization_format;
-
-/* Note:
- * - up to 16 types (TLV encoding: "4 bit key type" << 4 | "4 bit value type")
- * - key supports string and uint32 (compressed to uint8/uint16) only, this is also enforced by the API
- * - always add new enum at the end of the list (to avoid breaking backward compatibility) */
-typedef enum {
-  ndpi_serialization_unknown        =  0,
-  ndpi_serialization_end_of_record  =  1,
-  ndpi_serialization_uint8          =  2,
-  ndpi_serialization_uint16         =  3,
-  ndpi_serialization_uint32         =  4,
-  ndpi_serialization_uint64         =  5,
-  ndpi_serialization_int8           =  6,
-  ndpi_serialization_int16          =  7,
-  ndpi_serialization_int32          =  8,
-  ndpi_serialization_int64          =  9,
-  ndpi_serialization_float          = 10,
-  ndpi_serialization_string         = 11,
-  ndpi_serialization_start_of_block = 12,
-  ndpi_serialization_end_of_block   = 13,
-  ndpi_serialization_start_of_list  = 14,
-  ndpi_serialization_end_of_list    = 15,
-  /* Do not add new types!
-   * Exceeding 16 types requires reworking the TLV encoding due to key type limit (4 bit) */
-  ndpi_serialization_double         = 16 /* FIXX this is currently unusable */
-} ndpi_serialization_type;
-
-#define NDPI_SERIALIZER_DEFAULT_HEADER_SIZE 1024
-#define NDPI_SERIALIZER_DEFAULT_BUFFER_SIZE  256
-#define NDPI_SERIALIZER_DEFAULT_BUFFER_INCR 1024
-
-#define NDPI_SERIALIZER_STATUS_COMMA     (1 << 0)
-#define NDPI_SERIALIZER_STATUS_ARRAY     (1 << 1)
-#define NDPI_SERIALIZER_STATUS_EOR       (1 << 2)
-#define NDPI_SERIALIZER_STATUS_SOB       (1 << 3)
-#define NDPI_SERIALIZER_STATUS_NOT_EMPTY (1 << 4)
-#define NDPI_SERIALIZER_STATUS_LIST      (1 << 5)
-#define NDPI_SERIALIZER_STATUS_SOL       (1 << 6)
-#define NDPI_SERIALIZER_STATUS_HDR_DONE  (1 << 7)
-#define NDPI_SERIALIZER_STATUS_CEOB      (1 << 8)
-
-typedef struct {
-  u_int32_t size_used;
-} ndpi_private_serializer_buffer_status;
-
-typedef struct {
-  u_int32_t flags;
-  ndpi_private_serializer_buffer_status buffer;
-  ndpi_private_serializer_buffer_status header;
-} ndpi_private_serializer_status;
-
-typedef struct {
-  u_int32_t initial_size;
-  u_int32_t size;
-  u_int8_t *data;
-} ndpi_private_serializer_buffer;
-
-typedef struct {
-  ndpi_private_serializer_status status;
-  ndpi_private_serializer_buffer buffer;
-  ndpi_private_serializer_buffer header;
-  ndpi_serialization_format fmt;
-  char csv_separator[2];
-  u_int8_t has_snapshot;
-  u_int8_t multiline_json_array;
-  u_int8_t inner_json;
-  ndpi_private_serializer_status snapshot;
-} ndpi_private_serializer;
-
-#define ndpi_private_deserializer ndpi_private_serializer
-
-#ifdef NDPI_CFFI_PREPROCESSING
-typedef struct { char c[72]; } ndpi_serializer;
-#else
-typedef struct { char c[sizeof(ndpi_private_serializer)]; } ndpi_serializer;
-#endif
-
-#define ndpi_deserializer ndpi_serializer
 
 typedef struct {
   char *str;

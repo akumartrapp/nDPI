@@ -14,6 +14,9 @@ VPATH = @srcdir@:@srcdir@/protocols:@srcdir@/third_party/src:@srcdir@/third_part
 AR = @AR@
 CC = @CC@
 RANLIB = @RANLIB@
+# Preserve user's CFLAGS and LDFLAGS from configure
+CFLAGS = @CFLAGS@
+LDFLAGS = @LDFLAGS@
 #
 # Installation directories
 #
@@ -23,28 +26,31 @@ libdir     = @libdir@
 includedir = @includedir@/ndpi
 # For backwards compatibility
 PREFIX = $(prefix)
-ifneq ($(OS),Windows_NT)
-OS := $(shell uname)
+OS_TYPE = @OS_TYPE@
+ifneq ($(OS_TYPE),Windows_NT)
+AM_CFLAGS  = -fPIC -DPIC
+else
+AM_CFLAGS  =
 endif
-ifneq ($(OS),Windows_NT)
-CFLAGS     += -fPIC -DPIC
-endif
-CFLAGS     += -I$(srcdir) -I$(top_srcdir)/src/include -I$(top_builddir)/src/include -I$(srcdir)/third_party/include -DNDPI_LIB_COMPILATION @NDPI_CFLAGS@ @GPROF_CFLAGS@ @CUSTOM_NDPI@ @ADDITIONAL_INCS@
+AM_CFLAGS += -I$(srcdir) -I$(top_srcdir)/src/include -I$(top_builddir)/src/include -I$(srcdir)/third_party/include -DNDPI_LIB_COMPILATION @NDPI_CFLAGS@ @GPROF_CFLAGS@ @CUSTOM_NDPI@ @ADDITIONAL_INCS@
 CFLAGS_ndpi_bitmap.c := -Wno-unused-function
 CFLAGS_ndpi_bitmap64_fuse.c := -Wno-unused-function
 CFLAGS_gcrypt_light.c := -Wno-unused-function -Wno-unused-parameter
 CFLAGS_ahocorasick.c := -Wno-unused-function -Wno-unused-parameter
-CFLAGS_roaring.c := -Wno-unused-function -Wno-attributes
-LDFLAGS    += @NDPI_LDFLAGS@
+CFLAGS_roaring.c := -Wno-unused-function -Wno-attributes -Wno-missing-braces -Wno-missing-field-initializers
+# Use AM_LDFLAGS for package flags, never modify user's LDFLAGS
+AM_LDFLAGS = @NDPI_LDFLAGS@
 LIBS       = @ADDITIONAL_LIBS@ @LIBS@ @GPROF_LIBS@
 
 OBJECTS   = $(patsubst $(srcdir)/protocols/%.c, %.o, $(wildcard $(srcdir)/protocols/*.c)) $(patsubst $(srcdir)/third_party/src/%.c, %.o, $(wildcard $(srcdir)/third_party/src/*.c)) $(patsubst $(srcdir)/third_party/src/hll/%.c, %.o, $(wildcard $(srcdir)/third_party/src/hll/*.c)) $(patsubst $(srcdir)/%.c, %.o, $(wildcard $(srcdir)/*.c))
-HEADERS   = $(wildcard $(top_srcdir)/src/include/*.h) $(wildcard $(top_builddir)/src/include/*.h) $(wildcard $(srcdir)/*.h)
+HEADERS   = $(wildcard $(top_srcdir)/src/include/*.h) $(wildcard $(srcdir)/*.h)
+HEADERS  += $(top_builddir)/src/include/ndpi_config.h $(top_builddir)/src/include/ndpi_define.h
 NDPI_VERSION_MAJOR   = @NDPI_MAJOR@
 NDPI_LIB_STATIC      = libndpi.a
 NDPI_LIB_SHARED_BASE = libndpi.so
 NDPI_LIB_SHARED      = $(NDPI_LIB_SHARED_BASE).@NDPI_VERSION_SHORT@
-NDPI_LIBS            = $(NDPI_LIB_STATIC) $(NDPI_LIB_SHARED)
+ENABLE_SHARED        = @enable_shared@
+ENABLE_STATIC        = @enable_static@
 USE_HOST_LIBGCRYPT   = @USE_HOST_LIBGCRYPT@
 
 ifneq ($(USE_HOST_LIBGCRYPT),0)
@@ -54,8 +60,8 @@ endif
 
 BUILD_MINGW    		 = @BUILD_MINGW@
 
-ifeq ($(OS),Darwin)
-CC=clang -fno-color-diagnostics
+# Platform-specific settings
+ifeq ($(OS_TYPE),Darwin)
 SONAME_FLAG=
 else
 ifneq ($(BUILD_MINGW),)
@@ -66,24 +72,46 @@ SONAME_FLAG=-Wl,-soname,$(NDPI_LIB_SHARED_BASE).$(NDPI_VERSION_MAJOR)
 endif
 endif
 
+# Conditionally build libraries based on configure flags
+NDPI_LIBS =
+ifeq ($(ENABLE_STATIC),yes)
+NDPI_LIBS += $(NDPI_LIB_STATIC)
+endif
+ifeq ($(ENABLE_SHARED),yes)
+NDPI_LIBS += $(NDPI_LIB_SHARED)
+endif
+
+# Sanity check: at least one library type must be enabled
+ifeq ($(NDPI_LIBS),)
+$(error Cannot build with both --disable-shared and --disable-static)
+endif
+
 all: $(NDPI_LIBS)
 
-ndpi_main.o: $(srcdir)/ndpi_content_match.c.inc
+ndpi_main.o: $(srcdir)/ndpi_content_match.c.inc \
+             $(srcdir)/ndpi_dga_match.c.inc \
+             $(wildcard $(srcdir)/inc_generated/*.c.inc)
+
+ndpi_fingerprint.o: $(srcdir)/ndpi_os_fingerprint.c.inc
+
+$(OBJECTS): $(top_builddir)/src/include/ndpi_config.h $(top_builddir)/src/include/ndpi_define.h
 
 $(NDPI_LIB_STATIC): $(OBJECTS)
 	   $(AR) rc $@ $(OBJECTS)
 	   $(RANLIB) $@      
 
 $(NDPI_LIB_SHARED): $(OBJECTS)
-	$(CC) -shared -fPIC $(CFLAGS) $(SONAME_FLAG) -o $@ $(LDFLAGS) $(OBJECTS) $(LIBS)
+	$(CC) -shared -fPIC $(AM_CFLAGS) $(CFLAGS) $(SONAME_FLAG) -o $@ $(AM_LDFLAGS) $(LDFLAGS) $(OBJECTS) $(LIBS)
 	ln -fs $(NDPI_LIB_SHARED) $(NDPI_LIB_SHARED_BASE)
 	ln -fs $(NDPI_LIB_SHARED) $(NDPI_LIB_SHARED_BASE).$(NDPI_VERSION_MAJOR)
 
 %.o: %.c $(HEADERS) Makefile
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(CFLAGS_$(notdir $<)) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS) $(CFLAGS_$(notdir $<)) -c $< -o $@
 
 clean:
-	/bin/rm -f $(NDPI_LIB_STATIC) $(OBJECTS) *.o *.so *.lo libndpi.so*
+	$(RM) $(NDPI_LIB_STATIC) $(NDPI_LIB_SHARED) $(OBJECTS) *.o *.so *.so.* *.lo *.dll *.la
+	$(RM) $(NDPI_LIB_SHARED_BASE) $(NDPI_LIB_SHARED_BASE).$(NDPI_VERSION_MAJOR)
+	$(RM) -r .libs .deps
 
 distdir:
 	find $(srcdir) -type d | xargs -I'{}' mkdir -p '$(distdir)/{}'
@@ -96,7 +124,7 @@ distdir:
 		-o -name '*.h' | xargs -I'{}' cp '{}' '$(distdir)/{}'
 
 distclean: clean
-	/bin/rm -f Makefile
+	$(RM) Makefile
 
 check:
 	true # nothing to do here
@@ -105,11 +133,13 @@ cppcheck:
 	cppcheck --template='{file}:{line}:{severity}:{message}' --quiet --enable=all --force -I $(top_srcdir)/src/include $(srcdir)/*.c $(srcdir)/protocols/*.c
 
 install: $(NDPI_LIBS)
-	mkdir -p $(DESTDIR)@libdir@
+	@MKDIR_P@ $(DESTDIR)@libdir@
 	cp $(NDPI_LIBS) $(DESTDIR)@libdir@/
+ifeq ($(ENABLE_SHARED),yes)
 	cp -P $(NDPI_LIB_SHARED_BASE) $(DESTDIR)@libdir@/
 	cp -P $(NDPI_LIB_SHARED_BASE).$(NDPI_VERSION_MAJOR) $(DESTDIR)@libdir@/
-	mkdir -p $(DESTDIR)@includedir@/ndpi
+endif
+	@MKDIR_P@ $(DESTDIR)@includedir@/ndpi
 	#Avoid installing private header
 	# Installing header files to $(DESTDIR)@includedir@/ndpi
 	find $(top_srcdir)/src/include/*.h ! -name ndpi_private.h -exec cp "{}" $(DESTDIR)@includedir@/ndpi \;

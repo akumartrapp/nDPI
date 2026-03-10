@@ -1,7 +1,7 @@
 /*
  * tls.c - TLS/TLS/DTLS dissector
  *
- * Copyright (C) 2016-24 - ntop.org
+ * Copyright (C) 2016-26 - ntop.org
  *
  * nDPI is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -57,30 +57,10 @@ static void ndpi_search_tls_wrapper(struct ndpi_detection_module_struct *ndpi_st
 */
 
 #define JA_STR_LEN        1024
-#define MAX_NUM_JA         128
-#define MAX_JA_STRLEN      256
 
-union ja_info {
-  struct {
-    u_int16_t tls_handshake_version;
-    u_int16_t num_ciphers, cipher[MAX_NUM_JA];
-    u_int16_t num_tls_extensions, tls_extension[MAX_NUM_JA];
-    u_int16_t num_elliptic_curve, elliptic_curve[MAX_NUM_JA];
-    u_int16_t num_elliptic_curve_point_format, elliptic_curve_point_format[MAX_NUM_JA];
-    u_int16_t num_signature_algorithms, signature_algorithms[MAX_NUM_JA];
-    u_int16_t num_supported_versions, supported_versions[MAX_NUM_JA];
-    char signature_algorithms_str[MAX_JA_STRLEN], alpn[MAX_JA_STRLEN];
-    char alpn_original_last;  /* Store original last character before null terminator */
-  } client;
-
-  struct {
-    u_int16_t tls_handshake_version;
-    u_int16_t num_ciphers, cipher[MAX_NUM_JA];
-    u_int16_t num_tls_extensions, tls_extension[MAX_NUM_JA];
-    u_int16_t tls_supported_version;
-    u_int16_t num_elliptic_curve_point_format, elliptic_curve_point_format[MAX_NUM_JA];
-    char alpn[MAX_JA_STRLEN];
-  } server;
+union ndpi_ja_info {
+  ndpi_tls_client_info client;
+  ndpi_tls_server_info server;
 };
 
 /*
@@ -124,9 +104,9 @@ static bool str_contains_digit(char *str) {
 /* TODO: rename */
 static int keep_extra_dissection_tcp(struct ndpi_detection_module_struct *ndpi_struct,
                                      struct ndpi_flow_struct *flow) {
-  if(ndpi_struct->cfg.tls_blocks_analysis_enabled)
+  if(ndpi_struct->cfg.tls_max_num_blocks_to_analyze > 0)
     return(1); /* Process as much TLS blocks as the max packet number */
-  
+
   /* Common path: found handshake on both directions */
   if(
      (flow->tls_quic.certificate_processed == 1 && flow->protos.tls_quic.client_hello_processed)
@@ -141,6 +121,10 @@ static int keep_extra_dissection_tcp(struct ndpi_detection_module_struct *ndpi_s
     return 0;
   }
 
+  /* Non-warning alert */
+  if(flow->tls_quic.alert)
+    return 0;
+
   /* Are we interested only in the (sub)-classification? */
 
   if(/* Subclassification */
@@ -153,7 +137,7 @@ static int keep_extra_dissection_tcp(struct ndpi_detection_module_struct *ndpi_s
      !ndpi_struct->cfg.tls_cert_validity_enabled &&
      !ndpi_struct->cfg.tls_cert_issuer_enabled &&
      !ndpi_struct->cfg.tls_cert_subject_enabled &&
-     !ndpi_struct->cfg.tls_broswer_enabled &&
+     !ndpi_struct->cfg.tls_browser_enabled &&
      !ndpi_struct->cfg.tls_ja3s_fingerprint_enabled &&
      /* No flow risks from SH or certificate: we should have disabled all
         metadata needed for flow risks, so we should not need to explicitly
@@ -1130,6 +1114,41 @@ void processCertificateElements(struct ndpi_detection_module_struct *ndpi_struct
 
 /* **************************************** */
 
+static void tls_match_ja4(struct ndpi_detection_module_struct *ndpi_struct,
+			  struct ndpi_flow_struct *flow) {
+  if(ndpi_struct->ja4_custom_protos != NULL) {
+    u_int64_t proto_id;
+    ndpi_list *extra_data = NULL;
+
+    /* This protocol has been defined in protos.txt-like files */
+    if(ndpi_hash_find_entry_extra(ndpi_struct->ja4_custom_protos,
+				  flow->protos.tls_quic.ja4_client,
+				  NDPI_ARRAY_LENGTH(flow->protos.tls_quic.ja4_client) - 1,
+				  &proto_id, &extra_data) != 0)
+      return; /* Not found */
+    else
+      proto_id = ndpi_compare_flow_tls_blocks(ndpi_struct, flow, extra_data, proto_id);
+    
+    if(proto_id != NDPI_PROTOCOL_UNKNOWN)
+      ndpi_set_detected_protocol(ndpi_struct, flow, proto_id,
+				 ndpi_get_master_proto(ndpi_struct, flow),
+				 NDPI_CONFIDENCE_CUSTOM_RULE);
+  }
+
+  if(ndpi_struct->malicious_ja4_hashmap != NULL) {
+    u_int16_t rc1 = ndpi_hash_find_entry(ndpi_struct->malicious_ja4_hashmap,
+					 flow->protos.tls_quic.ja4_client,
+					 NDPI_ARRAY_LENGTH(flow->protos.tls_quic.ja4_client) - 1,
+					 NULL);
+
+    if(rc1 == 0)
+      ndpi_set_risk(ndpi_struct, flow, NDPI_MALICIOUS_FINGERPRINT,
+		    flow->protos.tls_quic.ja4_client);
+  }
+}
+
+/* **************************************** */
+
 /* See https://blog.catchpoint.com/2017/05/12/dissecting-tls-using-wireshark/ */
 int processCertificate(struct ndpi_detection_module_struct *ndpi_struct,
 		       struct ndpi_flow_struct *flow) {
@@ -1245,32 +1264,83 @@ int processCertificate(struct ndpi_detection_module_struct *ndpi_struct,
     certificates_offset += certificate_len;
   }
 
-  if((ndpi_struct->num_tls_blocks_to_follow != 0)
-     && (flow->l4.tcp.tls.num_processed_tls_blocks >= ndpi_struct->num_tls_blocks_to_follow)) {
-#ifdef DEBUG_TLS_BLOCKS
-    printf("*** [TLS Block] Enough blocks dissected\n");
-#endif
-
-    flow->extra_packets_func = NULL; /* We're good now */
-  }
-
   return(1);
 }
 
 /* **************************************** */
 
-static int processTLSBlock(struct ndpi_detection_module_struct *ndpi_struct,
-                           struct ndpi_flow_struct *flow) {
+static void handleTLSBlockStat(struct ndpi_detection_module_struct *ndpi_struct,
+			       struct ndpi_flow_struct *flow, bool *same_packet,
+			       u_int8_t record_type, u_int8_t handshake_type,
+			       u_int16_t block_len) {
+  struct ndpi_packet_struct *packet = &ndpi_struct->packet;
+
+  if(flow->l4_proto == IPPROTO_TCP &&
+     ndpi_struct->cfg.tls_max_num_blocks_to_analyze != 0) {
+    if(flow->l4.tcp.tls.tls_blocks == NULL) {
+      u_int len = sizeof(struct ndpi_tls_block) * ndpi_struct->cfg.tls_max_num_blocks_to_analyze;
+
+      flow->l4.tcp.tls.tls_blocks = (struct ndpi_tls_block *)ndpi_malloc(len);
+    }
+
+    if((flow->l4.tcp.tls.tls_blocks != NULL)
+       && (flow->l4.tcp.tls.num_tls_blocks < ndpi_struct->cfg.tls_max_num_blocks_to_analyze)) {
+
+      int32_t blen;
+      u_int32_t tdelta;
+      u_int16_t enc_block_type;
+
+      enc_block_type = ndpi_encode_tls_block_type(record_type, handshake_type);
+      blen = block_len;
+
+      if(flow->l4.tcp.tls.last_tls_block_time_ms)
+        tdelta = ndpi_struct->packet.current_time_ms - flow->l4.tcp.tls.last_tls_block_time_ms;
+      else
+        tdelta = 0;
+
+      if(packet->packet_direction == 1 /* srv -> cli */) blen *= -1;
+
+      flow->l4.tcp.tls.tls_blocks[flow->l4.tcp.tls.num_tls_blocks].len = blen,
+         flow->l4.tcp.tls.tls_blocks[flow->l4.tcp.tls.num_tls_blocks].msec_delta =
+        (tdelta > 0xFFFF) ?  0xFFFF : (u_int16_t)tdelta,
+        flow->l4.tcp.tls.tls_blocks[flow->l4.tcp.tls.num_tls_blocks].same_pkt = same_packet ? 1 : 0;
+      flow->l4.tcp.tls.tls_blocks[flow->l4.tcp.tls.num_tls_blocks++].block_type = enc_block_type;
+
+      flow->l4.tcp.tls.last_tls_block_time_ms = ndpi_struct->packet.current_time_ms;
+    }
+  }
+  if(*same_packet == false)
+    *same_packet = true;
+}
+
+/* **************************************** */
+
+static int processHandshakeTLSBlock(struct ndpi_detection_module_struct *ndpi_struct,
+				    struct ndpi_flow_struct *flow) {
   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
   int ret;
   int is_dtls = packet->udp || flow->stun.maybe_dtls;
+  u_int8_t handshake_type = packet->payload[0];
 
 #ifdef DEBUG_TLS
   printf("[TLS] Processing block %u\n", packet->payload[0]);
 #endif
 
-  switch(packet->payload[0] /* block type */) {
+  switch(handshake_type) {
   case 0x01: /* Client Hello */
+    if((flow->l4.tcp.three_way_handshake.syn_time != 0) /* Check only if 3WH was observed */
+       && (flow->l4.tcp.three_way_handshake.ack_time != 0)
+       ) {
+      u_int64_t tdiff_ms = packet->current_time_ms - flow->l4.tcp.three_way_handshake.ack_time;
+
+      if((tdiff_ms > 3000 /* 3 sec */) && (!ndpi_isset_risk(flow, NDPI_SLOW_DOS))) {
+	char buf[64];
+
+	snprintf(buf, sizeof(buf), "Slow TLS Request: %.1f sec", tdiff_ms/1000.);
+	ndpi_set_risk(ndpi_struct, flow, NDPI_SLOW_DOS, buf);
+      }
+    }
+
     flow->protos.tls_quic.client_hello_processed = 1;
     flow->protos.tls_quic.ch_direction = packet->packet_direction;
     processClientServerHello(ndpi_struct, flow, 0);
@@ -1295,12 +1365,11 @@ static int processTLSBlock(struct ndpi_detection_module_struct *ndpi_struct,
 	   flow->protos.tls_quic.ssl_version);
 #endif
 
-    if(!is_dtls && flow->protos.tls_quic.ssl_version >= 0x0304 /* TLS 1.3 */) {
+    if(!is_dtls && flow->protos.tls_quic.ssl_version >= 0x0304 /* TLS 1.3 */)
       flow->tls_quic.certificate_processed = 1; /* No Certificate with TLS 1.3+ */
-    }
-    if(is_dtls && flow->protos.tls_quic.ssl_version == 0xFEFC /* DTLS 1.3 */) {
+
+    if(is_dtls && flow->protos.tls_quic.ssl_version == 0xFEFC /* DTLS 1.3 */)
       flow->tls_quic.certificate_processed = 1; /* No Certificate with DTLS 1.3+ */
-    }
 
     checkTLSSubprotocol(ndpi_struct, flow, packet->payload[0] == 0x01);
     break;
@@ -1326,9 +1395,6 @@ static int processTLSBlock(struct ndpi_detection_module_struct *ndpi_struct,
       flow->tls_quic.certificate_processed = 1;
     }
     break;
-
-  default:
-    return(-1);
   }
 
   return(0);
@@ -1344,11 +1410,34 @@ static void ndpi_looks_like_tls(struct ndpi_detection_module_struct *ndpi_struct
 
 /* **************************************** */
 
+static int check_tls_type_and_version(const u_int8_t *buf, u_int16_t buf_len)
+{
+  /* Valid TLS Content Types:
+     https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-5 */
+  if(buf_len >= 1 &&
+     !(buf[0] >= 20 && buf[0] <= 26))
+    return 0;
+
+  /* Valid version in Record Layer
+     "Earlier versions of the TLS specification were not fully clear on what the record layer version
+     number (TLSPlaintext.version) should contain when sending ClientHello (i.e., before it is known
+     which version of the protocol will be employed). Thus, TLS servers compliant with this
+     specification MUST accept any value {03,XX} as the record layer version number for ClientHello."
+  */
+  if(buf_len >=2 && buf[1] != 0x03)
+    return 0;
+
+  return 1; /* ok */
+}
+
+/* **************************************** */
+
 int ndpi_search_tls_tcp(struct ndpi_detection_module_struct *ndpi_struct,
                         struct ndpi_flow_struct *flow) {
   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
   u_int8_t something_went_wrong = 0;
   message_t *message;
+  bool same_packet = false;
 
   if(packet->tcp == NULL)
     return 0; /* Error -> stop (this doesn't seem to be TCP) */
@@ -1376,13 +1465,6 @@ int ndpi_search_tls_tcp(struct ndpi_detection_module_struct *ndpi_struct,
 			    message) == -1)
     return 0; /* Error -> stop */
 
-  /* Valid TLS Content Types:
-     https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-5 */
-  if(!(message->buffer[0] >= 20 &&
-       message->buffer[0] <= 26)) {
-    something_went_wrong = 1;
-  }
-
   while(!something_went_wrong) {
     u_int32_t len;
     u_int16_t p_len;
@@ -1391,6 +1473,14 @@ int ndpi_search_tls_tcp(struct ndpi_detection_module_struct *ndpi_struct,
 
     if(message->buffer_used < 5)
       break;
+
+    if(!check_tls_type_and_version(message->buffer, message->buffer_used)) {
+#ifdef DEBUG_TLS_MEMORY
+      printf("[TLS Mem] Invalid record type/version");
+#endif
+      something_went_wrong = 1;
+      break;
+    }
 
     len = (message->buffer[3] << 8) + message->buffer[4] + 5;
 
@@ -1413,36 +1503,14 @@ int ndpi_search_tls_tcp(struct ndpi_detection_module_struct *ndpi_struct,
 
     content_type = message->buffer[0];
 
-    if(ndpi_struct->cfg.tls_blocks_analysis_enabled) {
-      if(flow->l4.tcp.tls.num_tls_blocks < NDPI_MAX_NUM_TLS_APPL_BLOCKS) {
-	int16_t blen = len-5;
-	
-	/* Use positive values for c->s and negative for s->c */
-	if(packet->packet_direction != 0) blen = -blen;
-	
-	flow->l4.tcp.tls.tls_blocks[flow->l4.tcp.tls.num_tls_blocks].len = blen;
-	flow->l4.tcp.tls.tls_blocks[flow->l4.tcp.tls.num_tls_blocks++].block_type = content_type;
-	
-#ifdef DEBUG_TLS_BLOCKS
-	printf("*** [TLS Block] [len: %u][num_tls_blocks: %u/%u]\n",
-	       len-5, flow->l4.tcp.tls.num_tls_blocks, ndpi_struct->num_tls_blocks_to_follow);
-#endif
-      }
-    }
+    if(content_type != 0x16)
+      handleTLSBlockStat(ndpi_struct, flow, &same_packet, content_type, 0, len - 5);
 
     /* Overwriting packet payload */
     p = packet->payload;
     p_len = packet->payload_packet_len; /* Backup */
 
     if(content_type == 0x14 /* Change Cipher Spec */) {
-      if(ndpi_struct->skip_tls_blocks_until_change_cipher) {
-	/*
-	  Ignore Application Data up until change cipher
-	  so in this case we reset the number of observed
-	  TLS blocks
-	*/
-	flow->l4.tcp.tls.num_processed_tls_blocks = 0;
-      }
       if(len == 6 &&
          message->buffer[1] == 0x03 && /* TLS >= 1.0 */
          ((message->buffer[3] << 8) + (message->buffer[4])) == 1) {
@@ -1459,7 +1527,7 @@ int ndpi_search_tls_tcp(struct ndpi_detection_module_struct *ndpi_struct,
         /* Further data is encrypted so we are not able to parse it without
            errors and without setting `something_went_wrong` variable */
 
-	if(!ndpi_struct->cfg.tls_blocks_analysis_enabled) {
+	if(ndpi_struct->cfg.tls_max_num_blocks_to_analyze == 0) {
 	  /*
 	    In case of TLS blocks analysis we want to analize all the blocks
 	    whereas in "standard" mode we can use this shortcut and break
@@ -1473,72 +1541,84 @@ int ndpi_search_tls_tcp(struct ndpi_detection_module_struct *ndpi_struct,
       printf("[TLS] *** TLS ALERT ***\n");
 #endif
 
-      if(len >= 7) {
+      flow->tls_quic.alert = 1;
+
+      /* Basic heuristic to tell if the alert is encrypted or not */
+      if(len == 7 &&
+         (message->buffer[5] == 1 ||
+          message->buffer[5] == 2)) {
 	u_int8_t alert_level = message->buffer[5];
 
 	if(alert_level == 2 /* Warning (1), Fatal (2) */)
 	  ndpi_set_risk(ndpi_struct, flow, NDPI_TLS_FATAL_ALERT, "Found fatal TLS alert");
+	else
+	  flow->tls_quic.alert = 0;
       }
 
       u_int16_t const alert_len = ntohs(*(u_int16_t const *)&message->buffer[3]);
-      if (message->buffer[1] == 0x03 &&
-          message->buffer[2] <= 0x04 &&
-          alert_len == (u_int32_t)message->buffer_used - 5)
-	{
-	  ndpi_int_tls_add_connection(ndpi_struct, flow);
-	}
-    }
-
-    if((len > 9)
-       && (content_type != 0x17 /* Application Data */)) {
+      if(alert_len == (u_int32_t)message->buffer_used - 5)
+	ndpi_int_tls_add_connection(ndpi_struct, flow);
+    } else if(content_type == 0x16 /* Handshake */) {
       /* Split the element in blocks */
       u_int32_t processed = 5;
 
-      while((processed+4) <= len) {
-	const u_int8_t *block = (const u_int8_t *)&message->buffer[processed];
-	u_int32_t block_len   = (block[1] << 16) + (block[2] << 8) + block[3];
+      if(len >= 9) {
+        while((processed+4) <= len) {
+          const u_int8_t *block = (const u_int8_t *)&message->buffer[processed];
+          u_int32_t block_len   = (block[1] << 16) + (block[2] << 8) + block[3];
 
-	if(/* (block_len == 0) || */ /* Note blocks can have zero lenght */
-	   (block_len > len) || ((block[1] != 0x0))) {
-	  something_went_wrong = 1;
-	  break;
-	}
+          if((current_pkt_from_client_to_server(ndpi_struct, flow) &&
+              flow->tls_quic.change_cipher_from_client == 1) ||
+             (!current_pkt_from_client_to_server(ndpi_struct, flow) &&
+              flow->tls_quic.change_cipher_from_server == 1)) {
+#ifdef DEBUG_TLS_MEMORY
+            printf("[TLS Mem] Encrypted Handshake msg. Skip\n");
+#endif
 
-	packet->payload = block;
-	packet->payload_packet_len = ndpi_min(block_len+4, message->buffer_used);
+            handleTLSBlockStat(ndpi_struct, flow, &same_packet, 0x16, 0, len - 5);
 
-	if((processed+packet->payload_packet_len) > len) {
-	  something_went_wrong = 1;
-	  break;
-	}
+	    /* We don't have block len, so ignore the entire record */
+            processed += len - 5;
+            break;
+          }
 
-	processTLSBlock(ndpi_struct, flow);
+          if(/* (block_len == 0) || */ /* Note blocks can have zero lenght */
+             (block_len > len) || ((block[1] != 0x0))) {
+            something_went_wrong = 1;
+            break;
+          }
+
+          packet->payload = block;
+          packet->payload_packet_len = ndpi_min(block_len+4, message->buffer_used);
+
+          if((processed+packet->payload_packet_len) > len) {
+            something_went_wrong = 1;
+            break;
+          }
+
+          handleTLSBlockStat(ndpi_struct, flow, &same_packet, 0x16, block[0], block_len);
+
+	  processHandshakeTLSBlock(ndpi_struct, flow);
+          ndpi_looks_like_tls(ndpi_struct, flow);
+
+          processed += packet->payload_packet_len;
+        }
+      }
+    } else if(content_type == 0x17 /* Application Data */) {
+      u_int32_t block_len   = (message->buffer[3] << 8) + (message->buffer[4]);
+
+      /* Let's do a quick check to make sure this really looks like TLS */
+      if(block_len < 16384 /* Max TLS block size */)
 	ndpi_looks_like_tls(ndpi_struct, flow);
 
-	processed += packet->payload_packet_len;
-      }
-    } else if(len > 5 /* Minimum block size */) {
-      /* Process element as a whole */
-      if(content_type == 0x17 /* Application Data */) {
-	u_int32_t block_len   = (message->buffer[3] << 8) + (message->buffer[4]);
+      if(block_len == (u_int32_t)message->buffer_used - 5)
+	ndpi_int_tls_add_connection(ndpi_struct, flow);
 
-	/* Let's do a quick check to make sure this really looks like TLS */
-	if(block_len < 16384 /* Max TLS block size */)
-	  ndpi_looks_like_tls(ndpi_struct, flow);
-
-	if (message->buffer[1] == 0x03 &&
-	    message->buffer[2] <= 0x04 &&
-	    block_len == (u_int32_t)message->buffer_used - 5)
-	  {
-	    ndpi_int_tls_add_connection(ndpi_struct, flow);
-	  }
-
-	/* If we have seen Application Data blocks in both directions, it means
-	   we are after the handshake. Stop extra processing */
-	flow->l4.tcp.tls.app_data_seen[packet->packet_direction] = 1;
-	if(flow->l4.tcp.tls.app_data_seen[!packet->packet_direction] == 1)
-	  flow->tls_quic.certificate_processed = 1;
-      }
+      /* If we have seen Application Data blocks in both directions, it means
+	 we are after the handshake. Stop extra processing */
+      flow->l4.tcp.tls.app_data_seen[packet->packet_direction] = 1;
+      if(flow->l4.tcp.tls.app_data_seen[!packet->packet_direction] == 1)
+	flow->tls_quic.certificate_processed = 1;
     }
 
     packet->payload = p;
@@ -1556,13 +1636,16 @@ int ndpi_search_tls_tcp(struct ndpi_detection_module_struct *ndpi_struct,
   }
 
 #ifdef DEBUG_TLS_MEMORY
-  printf("[TLS] Eval if keep going [%p]\n", flow->extra_packets_func);
+  printf("[TLS] Eval if keep going [%p][blocks:%d/%d][wrong:%d]\n",
+         flow->extra_packets_func,
+         flow->l4.tcp.tls.num_tls_blocks, ndpi_struct->cfg.tls_max_num_blocks_to_analyze,
+         something_went_wrong);
 #endif
 
   if(something_went_wrong
-     || ((ndpi_struct->num_tls_blocks_to_follow > 0)
-	 && (flow->l4.tcp.tls.num_processed_tls_blocks == ndpi_struct->num_tls_blocks_to_follow))
-     || ((ndpi_struct->num_tls_blocks_to_follow == 0)
+     || ((ndpi_struct->cfg.tls_max_num_blocks_to_analyze > 0)
+	 && (flow->l4.tcp.tls.num_tls_blocks == ndpi_struct->cfg.tls_max_num_blocks_to_analyze))
+     || ((ndpi_struct->cfg.tls_max_num_blocks_to_analyze == 0)
 	 && (!keep_extra_dissection_tcp(ndpi_struct, flow)))
      ) {
 #ifdef DEBUG_TLS_BLOCKS
@@ -1584,7 +1667,10 @@ int ndpi_search_tls_tcp(struct ndpi_detection_module_struct *ndpi_struct,
       ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_OOKLA, NDPI_PROTOCOL_TLS, NDPI_CONFIDENCE_DPI_AGGRESSIVE);
       /* TLS over port 8080 usually triggers that risk; clear it */
       ndpi_unset_risk(ndpi_struct, flow, NDPI_KNOWN_PROTOCOL_ON_NON_STANDARD_PORT);
+
+      tls_match_ja4(ndpi_struct, flow);
       flow->extra_packets_func = NULL;
+
       return(0); /* That's all */
     /* Loook for TLS-in-TLS */
     } else if((ndpi_struct->cfg.tls_heuristics & NDPI_HEURISTICS_TLS_OBFUSCATED_TLS) && /* Feature enabled */
@@ -1597,6 +1683,8 @@ int ndpi_search_tls_tcp(struct ndpi_detection_module_struct *ndpi_struct,
       switch_extra_dissection_to_tls_obfuscated_heur(ndpi_struct, flow);
       return(1);
     } else {
+      tls_match_ja4(ndpi_struct, flow);
+
       flow->extra_packets_func = NULL;
       return(0); /* That's all */
     }
@@ -1689,7 +1777,7 @@ static int ndpi_search_dtls(struct ndpi_detection_module_struct *ndpi_struct,
 	if((handshake_len + 12) == block_len) {
           packet->payload = &block[13];
           packet->payload_packet_len = block_len;
-          processTLSBlock(ndpi_struct, flow);
+          processHandshakeTLSBlock(ndpi_struct, flow);
 	} else if(handshake_len + 12 > block_len) {
 	  int rc;
 
@@ -1725,7 +1813,7 @@ static int ndpi_search_dtls(struct ndpi_detection_module_struct *ndpi_struct,
           if(handshake_len + 12 == message->buffer_used) {
             packet->payload = message->buffer;
             packet->payload_packet_len = message->buffer_used;
-            processTLSBlock(ndpi_struct, flow);
+            processHandshakeTLSBlock(ndpi_struct, flow);
 
             ndpi_free(message->buffer);
             memset(message, '\0', sizeof(*message));
@@ -1783,6 +1871,7 @@ static int ndpi_search_dtls(struct ndpi_detection_module_struct *ndpi_struct,
 
     processed += block_len + 13;
   }
+
   if(processed != p_len && message == NULL /* No pending reassembler */) {
 #ifdef DEBUG_TLS
     printf("[TLS] DTLS invalid processed len %d/%d (%d)\n", processed, p_len, change_cipher_found);
@@ -1809,7 +1898,7 @@ static void tlsInitExtraPacketProcessing(struct ndpi_detection_module_struct *nd
 
   /* At most 12 packets should almost always be enough to find the server certificate if it's there.
      Exception: DTLS traffic with fragments, retransmissions and STUN packets */
-  flow->max_extra_packets_to_check = ((packet->udp != NULL) ? 20 : 12) + (ndpi_struct->num_tls_blocks_to_follow*4);
+  flow->max_extra_packets_to_check = ((packet->udp != NULL) ? 20 : 12) + (ndpi_struct->cfg.tls_max_num_blocks_to_analyze*4);
   flow->extra_packets_func = (packet->udp != NULL) ? ndpi_search_dtls : ndpi_search_tls_tcp;
 }
 
@@ -2078,17 +2167,40 @@ static bool is_grease_version(u_int16_t version) {
 
 /* **************************************** */
 
+bool skipTLSextension(struct ndpi_detection_module_struct *ndpi_struct,
+		      u_int16_t extension_id)  {
+  if((extension_id == 0x0 /* SNI */) && ndpi_struct->cfg.tls_ndpifp_ignore_sni_extension)
+    return(true);
+
+  if(ndpi_struct->cfg.tls_ja_ignore_ephemeral_extensions) {
+    switch(extension_id) {
+    case 0x23: /* session ticket - RFC 9149 */
+    case 0x29: /* pre-shared key - RFC 8446 */
+    case 0x15: /* padding        - RFC 7685 */
+      /* Noisy extensions */
+    case 0x2b: /* Supported TLS versions    */
+    case 0x0a: /* Supported groups          */
+      return(true);
+    }
+  }
+
+  return(false);
+}
+
+/* **************************************** */
+
 static void ndpi_compute_ja4(struct ndpi_detection_module_struct *ndpi_struct,
 			     struct ndpi_flow_struct *flow,
 			     u_int32_t quic_version,
-			     union ja_info *ja) {
-  u_int8_t tmp_str[JA_STR_LEN];
-  u_int tmp_str_len, num_extn;
+			     union ndpi_ja_info *ja) {
+  u_int8_t tmp_str[JA_STR_LEN], tmp_ndpi_str[512];
+  u_int tmp_str_len, tmp_ndpi_str_len = 0, num_extn, num_ndpi_extn;
   u_int8_t sha_hash[NDPI_SHA256_BLOCK_SIZE];
-  u_int16_t ja_str_len, i;
+  u_int16_t ja_str_len, i, ja_offset;
   int rc;
   u_int16_t tls_handshake_version = ja->client.tls_handshake_version;
   char * const ja_str = &flow->protos.tls_quic.ja4_client[0];
+  char * const ja_ndpi_str = &flow->protos.tls_quic.ja4_ndpi_client[0];
   const u_int16_t ja_max_len = sizeof(flow->protos.tls_quic.ja4_client);
   bool is_dtls = ((flow->l4_proto == IPPROTO_UDP) && (quic_version == 0)) || flow->stun.maybe_dtls;
   int ja4_r_len = 0;
@@ -2115,9 +2227,9 @@ static void ndpi_compute_ja4(struct ndpi_detection_module_struct *ndpi_struct,
   ja_str[0] = is_dtls ? 'd' : ((quic_version != 0) ? 'q' : 't');
 
   for(i=0; i<ja->client.num_supported_versions; i++) {
-    if((!is_grease_version(ja->client.supported_versions[i]))
-       && (tls_handshake_version < ja->client.supported_versions[i]))
-      tls_handshake_version = ja->client.supported_versions[i];
+    if((!is_grease_version(ja->client.supported_version[i]))
+       && (tls_handshake_version < ja->client.supported_version[i]))
+      tls_handshake_version = ja->client.supported_version[i];
   }
 
   switch(tls_handshake_version) {
@@ -2194,7 +2306,8 @@ static void ndpi_compute_ja4(struct ndpi_detection_module_struct *ndpi_struct,
 #endif
 
   rc = ndpi_snprintf(&ja_str[ja_str_len], ja_max_len - ja_str_len, "%02u%02u%c%c_",
-		     ja->client.num_ciphers, ja->client.num_tls_extensions,
+		     ndpi_min(99, ja->client.num_ciphers),
+		     ndpi_min(99, ja->client.num_tls_extensions),
 		     alpn_first, alpn_last);
   if((rc > 0) && (ja_str_len + rc < JA_STR_LEN)) ja_str_len += rc;
 
@@ -2221,7 +2334,11 @@ static void ndpi_compute_ja4(struct ndpi_detection_module_struct *ndpi_struct,
   i = snprintf(&ja4_r[ja4_r_len], sizeof(ja4_r)-ja4_r_len, "%s_", tmp_str); if(i > 0) ja4_r_len += i;
 #endif
 
-  ndpi_sha256(tmp_str, tmp_str_len, sha_hash);
+  if(ja->client.num_ciphers > 0) {
+    ndpi_sha256(tmp_str, tmp_str_len, sha_hash);
+  } else {
+    memset(sha_hash, '\0', 6);
+  }
 
   rc = ndpi_snprintf(&ja_str[ja_str_len], ja_max_len - ja_str_len,
 		     "%02x%02x%02x%02x%02x%02x_",
@@ -2239,7 +2356,7 @@ static void ndpi_compute_ja4(struct ndpi_detection_module_struct *ndpi_struct,
 #endif
 
   tmp_str_len = 0;
-  for(i=0, num_extn = 0; i<ja->client.num_tls_extensions; i++) {
+  for(i=0, num_extn = num_ndpi_extn = 0; i<ja->client.num_tls_extensions; i++) {
     if((ja->client.tls_extension[i] > 0) && (ja->client.tls_extension[i] != 0x10 /* ALPN extension */)) {
 #ifdef JA4R_DECIMAL
       rc = snprintf(&ja4_r[ja4_r_len], sizeof(ja4_r)-ja4_r_len, "%s%u", (num_extn > 0) ? "," : "", ja->client.tls_extension[i]);
@@ -2250,13 +2367,24 @@ static void ndpi_compute_ja4(struct ndpi_detection_module_struct *ndpi_struct,
 			 (num_extn > 0) ? "," : "", ja->client.tls_extension[i]);
       if((rc > 0) && (tmp_str_len + rc < JA_STR_LEN)) tmp_str_len += rc; else break;
       num_extn++;
+
+      if(!skipTLSextension(ndpi_struct, ja->client.tls_extension[i])) {
+	rc = ndpi_snprintf((char *)&tmp_ndpi_str[tmp_ndpi_str_len], sizeof(tmp_ndpi_str)-tmp_ndpi_str_len, "%s%04x",
+			   (num_ndpi_extn > 0) ? "," : "", ja->client.tls_extension[i]);
+	if((rc > 0) && (tmp_ndpi_str_len + rc < sizeof(tmp_ndpi_str))) tmp_ndpi_str_len += rc; else break;
+	num_ndpi_extn++;
+      }
     }
   }
 
   for(i=0; i<ja->client.num_signature_algorithms; i++) {
     rc = ndpi_snprintf((char *)&tmp_str[tmp_str_len], JA_STR_LEN-tmp_str_len, "%s%04x",
-		       (i > 0) ? "," : "_", ja->client.signature_algorithms[i]);
+		       (i > 0) ? "," : "_", ja->client.signature_algorithm[i]);
     if((rc > 0) && (tmp_str_len + rc < JA_STR_LEN)) tmp_str_len += rc; else break;
+
+    rc = ndpi_snprintf((char *)&tmp_ndpi_str[tmp_ndpi_str_len], sizeof(tmp_ndpi_str)-tmp_ndpi_str_len, "%s%04x",
+		       (i > 0) ? "," : "_", ja->client.signature_algorithm[i]);
+    if((rc > 0) && (tmp_ndpi_str_len + rc < sizeof(tmp_ndpi_str))) tmp_ndpi_str_len += rc; else break;
   }
 
 #ifdef DEBUG_JA
@@ -2277,15 +2405,27 @@ static void ndpi_compute_ja4(struct ndpi_detection_module_struct *ndpi_struct,
 #endif
   }
 
-  ndpi_sha256(tmp_str, tmp_str_len, sha_hash);
+  if(ja->client.num_tls_extensions > 0) ndpi_sha256(tmp_str, tmp_str_len, sha_hash); else memset(sha_hash, '\0', 6);
 
+  ja_offset = ja_str_len;
   rc = ndpi_snprintf(&ja_str[ja_str_len], ja_max_len - ja_str_len,
 		     "%02x%02x%02x%02x%02x%02x",
 		     sha_hash[0], sha_hash[1], sha_hash[2],
 		     sha_hash[3], sha_hash[4], sha_hash[5]);
   if((rc > 0) && (ja_str_len + rc < JA_STR_LEN)) ja_str_len += rc;
-
   ja_str[36] = 0;
+
+  /* nDPI */
+  if(ja->client.num_tls_extensions > 0) ndpi_sha256(tmp_ndpi_str, tmp_ndpi_str_len, sha_hash); else memset(sha_hash, '\0', 6);
+  ja_str_len = ja_offset;
+  strncpy(ja_ndpi_str, ja_str, ja_str_len);
+
+  rc = ndpi_snprintf(&ja_ndpi_str[ja_str_len], ja_max_len - ja_str_len,
+		     "%02x%02x%02x%02x%02x%02x",
+		     sha_hash[0], sha_hash[1], sha_hash[2],
+		     sha_hash[3], sha_hash[4], sha_hash[5]);
+  if((rc > 0) && (ja_str_len + rc < JA_STR_LEN)) ja_str_len += rc;
+  ja_ndpi_str[36] = 0;
 
 #ifdef DEBUG_JA
   printf("[JA4] %s [len: %lu]\n", ja_str, strlen(ja_str));
@@ -2297,7 +2437,7 @@ static void ndpi_compute_ja4(struct ndpi_detection_module_struct *ndpi_struct,
 int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 			     struct ndpi_flow_struct *flow, u_int32_t quic_version) {
   struct ndpi_packet_struct *packet = &ndpi_struct->packet;
-  union ja_info ja;
+  union ndpi_ja_info ja;
   u_int8_t invalid_ja = 0;
   u_int16_t tls_version;
   u_int32_t i, j;
@@ -2341,10 +2481,7 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
     if(handshake_type == 0x02 /* Server Hello */) {
       int rc;
 
-      ja.server.num_ciphers = 0;
-      ja.server.num_tls_extensions = 0;
-      ja.server.num_elliptic_curve_point_format = 0;
-      ja.server.alpn[0] = '\0';
+      memset(&ja.server, 0, sizeof(ja.server));
 
       ja.server.tls_handshake_version = tls_version;
 
@@ -2586,19 +2723,21 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 #ifdef DEBUG_TLS
         printf("[JA3] Server: %s \n", flow->protos.tls_quic.ja3_server);
 #endif
+
+	if(ndpi_struct->cfg.tls_ja_data_enabled) {
+	  if(flow->protos.tls_quic.ja_server == NULL) {
+	    flow->protos.tls_quic.ja_server = ndpi_malloc(sizeof(ndpi_tls_server_info));
+
+	    if(flow->protos.tls_quic.ja_server != NULL)
+	      memcpy(flow->protos.tls_quic.ja_server, &ja.server, sizeof(ndpi_tls_server_info));
+	  }
+	}
       }
     } else if(handshake_type == 0x01 /* Client Hello */) {
       u_int16_t cipher_len, cipher_offset;
       u_int8_t cookie_len = 0;
 
-      ja.client.num_ciphers = 0;
-      ja.client.num_tls_extensions = 0;
-      ja.client.num_elliptic_curve = 0;
-      ja.client.num_elliptic_curve_point_format = 0;
-      ja.client.num_signature_algorithms = 0;
-      ja.client.num_supported_versions = 0;
-      ja.client.signature_algorithms_str[0] = '\0';
-      ja.client.alpn[0] = '\0', ja.client.alpn[1] = '\0' /* used by JA4 */;
+      memset(&ja.client, 0, sizeof(ja.client));
       ja.client.alpn_original_last = '0'; /* Initialize to '0' if no ALPN */
 
       flow->protos.tls_quic.ssl_version = ja.client.tls_handshake_version = tls_version;
@@ -2646,9 +2785,9 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 
 	  if(cipher_offset+i+1 < packet->payload_packet_len &&
 	     ((packet->payload[cipher_offset+i] != packet->payload[cipher_offset+i+1]) ||
-	      ((packet->payload[cipher_offset+i] & 0xF) != 0xA)) /* Skip Grease */) {
+	      ((packet->payload[cipher_offset+i] & 0xF) != 0xA)) /* Skip GREASE */) {
 	    /*
-	      Skip GREASE [https://tools.ietf.org/id/draft-ietf-tls-grease-01.html]
+	      Skip GREASE [https://datatracker.ietf.org/doc/html/rfc8701]
 	      https://engineering.salesforce.com/tls-fingerprinting-with-ja3-and-ja3s-247362855967
 	    */
 
@@ -2709,7 +2848,7 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 	  i += 2;
 	} /* for */
 
-	if(ndpi_struct->cfg.tls_broswer_enabled) {
+	if(ndpi_struct->cfg.tls_browser_enabled) {
           /* NOTE:
              we do not check for duplicates as with signatures because
              this is time consuming and we want to avoid overhead whem possible
@@ -2797,9 +2936,25 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 		 ((packet->payload[extn_off] & 0xF) != 0xA)) {
 		/* Skip GREASE */
 
-		if(ja.client.num_tls_extensions < MAX_NUM_JA)
+		if(ja.client.num_tls_extensions < MAX_NUM_JA) {
+		  if(((extension_id == 0xFE0D /* ECHO */) || skipTLSextension(ndpi_struct, extension_id))
+		     && (flow->l4_proto == IPPROTO_TCP)
+		     && (ndpi_struct->cfg.tls_max_num_blocks_to_analyze > 0)
+		     && (flow->l4.tcp.tls.tls_blocks != NULL)
+		     && (flow->l4.tcp.tls.num_tls_blocks > 0) /* It should always be like that */) {
+		    /*
+		      Taking EncryptedClientHello (ECHO) lenght out of the block lenght
+		      allows us to have a consistent measurement regardless of the SNI being used
+		      and other information put in ECHO across requests
+		    */
+		    if(extension_id == 0x0 /* SNI */)
+		      ; /* Nothing to do as already handled by (***) */
+		    else
+		      flow->l4.tcp.tls.tls_blocks[flow->l4.tcp.tls.num_tls_blocks-1].len -= extension_len + 4 /* id + len */;
+		  }
+
 		  ja.client.tls_extension[ja.client.num_tls_extensions++] = extension_id;
-		else {
+		} else {
 		  invalid_ja = 1;
 #ifdef DEBUG_TLS
 		  printf("Client TLS Invalid extensions %u\n", ja.client.num_tls_extensions);
@@ -2823,6 +2978,22 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 #ifdef DEBUG_TLS
 		    printf("[TLS] SNI: [%s]\n", sni);
 #endif
+		    if(sni /* It should always be like that */
+		       && (flow->l4_proto == IPPROTO_TCP)
+		       && (ndpi_struct->cfg.tls_max_num_blocks_to_analyze > 0)
+		       && (flow->l4.tcp.tls.tls_blocks != NULL)
+		       && (flow->l4.tcp.tls.num_tls_blocks > 0) /* It should always be like that */
+		       ) {
+		      /*
+			Taking SNI lenght out of the block lenght allows us to have a consistent
+			measurement regardless of the SNI being used
+		      */
+		      if(ndpi_struct->cfg.tls_ndpifp_ignore_sni_extension)
+			flow->l4.tcp.tls.tls_blocks[flow->l4.tcp.tls.num_tls_blocks-1].len -= extension_len + 4 /* id + len */;
+		      else
+			flow->l4.tcp.tls.tls_blocks[flow->l4.tcp.tls.num_tls_blocks-1].len -= sni_len; /* (***) */
+		    }
+
 		    if(ndpi_is_valid_hostname((char *)&packet->payload[offset+extension_offset+5], len) == 0) {
 		      ndpi_set_risk(ndpi_struct, flow, NDPI_INVALID_CHARACTERS, sni);
 
@@ -2916,21 +3087,16 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 #ifdef DEBUG_TLS
 		    printf("Client TLS [EllipticCurve: %u/0x%04X]\n", s_group, s_group);
 #endif
-		    switch(s_group) {
-		    case 0x11EC: /* X25519MLKEM768 */
-		      flow->protos.tls_quic.pq_supported_groups = 1;
-		      break;
-		    }
 
 		    if((s_group == 0) || (packet->payload[s_offset+i] != packet->payload[s_offset+i+1])
 		       || ((packet->payload[s_offset+i] & 0xF) != 0xA)) {
 		      /* Skip GREASE */
-		      if(ja.client.num_elliptic_curve < MAX_NUM_JA)
-			ja.client.elliptic_curve[ja.client.num_elliptic_curve++] = s_group;
+		      if(ja.client.num_elliptic_curve_groups < MAX_NUM_JA)
+			ja.client.elliptic_curve_group[ja.client.num_elliptic_curve_groups++] = s_group;
 		      else {
 			invalid_ja = 1;
 #ifdef DEBUG_TLS
-			printf("Client TLS Invalid num elliptic %u\n", ja.client.num_elliptic_curve);
+			printf("Client TLS Invalid num elliptic group %u\n", ja.client.num_elliptic_curve_groups);
 #endif
 		      }
 		    }
@@ -2982,19 +3148,9 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 		s_offset += 2;
 		tot_signature_algorithms_len = ndpi_min((sizeof(ja.client.signature_algorithms_str) / 2) - 1, tot_signature_algorithms_len);
 
-#ifdef TLS_HANDLE_SIGNATURE_ALGORITMS
-		size_t sa_size = ndpi_min(tot_signature_algorithms_len / 2, MAX_NUM_TLS_SIGNATURE_ALGORITHMS);
+		for(i=0, id=0; i<tot_signature_algorithms_len && s_offset+i+1<total_len; i += 2)
+		  ja.client.signature_algorithm[id++] = ntohs(*(u_int16_t*)&packet->payload[s_offset+i]);
 
-		if (s_offset + 2 * sa_size <= packet->payload_packet_len) {
-		  flow->protos.tls_quic.num_tls_signature_algorithms = sa_size;
-		  memcpy(flow->protos.tls_quic.client_signature_algorithms,
-			 &packet->payload[s_offset], 2 /* 16 bit */ * sa_size);
-		}
-#endif
-
-		for(i=0, id=0; i<tot_signature_algorithms_len && s_offset+i+1<total_len; i += 2) {
-		  ja.client.signature_algorithms[id++] = ntohs(*(u_int16_t*)&packet->payload[s_offset+i]);
-		}
 		ja.client.num_signature_algorithms = id;
 
 		for(i=0, id=0; i<tot_signature_algorithms_len && s_offset+i+1<total_len; i++) {
@@ -3004,7 +3160,7 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 		  if(rc < 0) break;
 		}
 
-		if(ndpi_struct->cfg.tls_broswer_enabled) {
+		if(ndpi_struct->cfg.tls_browser_enabled) {
 	          int chrome_signature_algorithms = 0, duplicate_found = 0, last_signature = 0;
 
                   for(i=0; i<tot_signature_algorithms_len && s_offset + (int)i + 2 < packet->payload_packet_len; i+=2) {
@@ -3236,7 +3392,7 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 			version_str_len += rc;
 
 		      if(ja.client.num_supported_versions < MAX_NUM_JA)
-			ja.client.supported_versions[ja.client.num_supported_versions++] = tls_version;
+			ja.client.supported_version[ja.client.num_supported_versions++] = tls_version;
 		    }
 		  }
 
@@ -3355,12 +3511,10 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
                            extn_offset,
                            group_id, key_extn_len);
   #endif
-
-                    switch(group_id) {
-                    case 0x11EC: /* X25519MLKEM768 */
-                      flow->protos.tls_quic.pq_key_share = 1;
-                      break;
-                    }
+		    if(group_id != 0x2A2A /* Skip GREASE */) {
+		      if(ja.client.num_key_share_groups < MAX_NUM_JA)
+			ja.client.key_share_group[ja.client.num_key_share_groups++] = group_id;
+		    }
 
                     extn_offset += key_extn_len + 4;
                   }
@@ -3384,31 +3538,18 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 compute_ja4c:
 	      if(ndpi_struct->cfg.tls_ja4c_fingerprint_enabled) {
 	        ndpi_compute_ja4(ndpi_struct, flow, quic_version, &ja);
-
-		if(ndpi_struct->ja4_custom_protos != NULL) {
-		  u_int64_t proto_id;
-
-		  /* This protocol has been defined in protos.txt-like files */
-		  if(ndpi_hash_find_entry(ndpi_struct->ja4_custom_protos,
-					  flow->protos.tls_quic.ja4_client,
-					  NDPI_ARRAY_LENGTH(flow->protos.tls_quic.ja4_client) - 1,
-					  &proto_id) == 0) {
-		    ndpi_set_detected_protocol(ndpi_struct, flow, proto_id,
-					       ndpi_get_master_proto(ndpi_struct, flow),
-					       NDPI_CONFIDENCE_CUSTOM_RULE);
-		  }
-		}
-
-                if(ndpi_struct->malicious_ja4_hashmap != NULL) {
-                  u_int16_t rc1 = ndpi_hash_find_entry(ndpi_struct->malicious_ja4_hashmap,
-                                                       flow->protos.tls_quic.ja4_client,
-                                                       NDPI_ARRAY_LENGTH(flow->protos.tls_quic.ja4_client) - 1,
-                                                       NULL);
-
-                  if(rc1 == 0)
-                    ndpi_set_risk(ndpi_struct, flow, NDPI_MALICIOUS_FINGERPRINT, flow->protos.tls_quic.ja4_client);
-                }
+		tls_match_ja4(ndpi_struct, flow);
 	      }
+
+	      if(ndpi_struct->cfg.tls_ja_data_enabled) {
+		if(flow->protos.tls_quic.ja_client == NULL) {
+		  flow->protos.tls_quic.ja_client = ndpi_malloc(sizeof(ndpi_tls_client_info));
+
+		  if(flow->protos.tls_quic.ja_client != NULL)
+		    memcpy(flow->protos.tls_quic.ja_client, &ja.client, sizeof(ndpi_tls_client_info));
+		}
+	      }
+
 	      /* End JA4 */
 	    }
 
@@ -3522,7 +3663,7 @@ static void ndpi_search_tls_wrapper(struct ndpi_detection_module_struct *ndpi_st
 /* **************************************** */
 
 void init_tls_dissector(struct ndpi_detection_module_struct *ndpi_struct) {
-  register_dissector("(D)TLS", ndpi_struct,
+  ndpi_register_dissector("(D)TLS", ndpi_struct,
                      ndpi_search_tls_wrapper,
                      NDPI_SELECTION_BITMASK_PROTOCOL_V4_V6_TCP_OR_UDP_WITH_PAYLOAD_WITHOUT_RETRANSMISSION,
                      2,
